@@ -1,4 +1,4 @@
-<h1 align="center">🏦 merchant-settlement-dbt</h1>
+<h1 align="center">merchant-settlement-dbt</h1>
 
 <p align="center">
   <b>What happens when a card settlement shows up four days late?</b><br>
@@ -14,7 +14,7 @@
 
 ---
 
-## 🤔 The problem
+## The problem
 
 When you tap your card, two things happen — and they don't happen together.
 
@@ -30,15 +30,15 @@ Every one of these quirks breaks a naive pipeline **silently**. No error, no fai
 
 ```mermaid
 flowchart LR
-    subgraph day1 ["🗓️ Monday"]
+    subgraph day1 ["Monday"]
       A1["auth $40"]
     end
-    subgraph day2 ["🗓️ Tuesday"]
+    subgraph day2 ["Tuesday"]
       A2["auth $25"]
     end
-    subgraph friday ["🗓️ Friday"]
-      S1["settles $48 💸<br/><i>belongs to Monday</i>"]
-      S2["never settles ❌"]
+    subgraph friday ["Friday"]
+      S1["settles $48<br/><i>belongs to Monday</i>"]
+      S2["never settles"]
     end
     A1 -.4 days late.-> S1
     A2 -.reversed.-> S2
@@ -53,20 +53,20 @@ Monday's total was wrong all week. Nothing told you.
 
 ---
 
-## 🧱 How it's built
+## How it's built
 
 ```mermaid
 flowchart TD
-    R1[("🌱 raw_authorizations")] --> S1["stg_authorizations"]
-    R2[("🌱 raw_settlements")] --> S2["stg_settlements"]
-    R3[("🌱 raw_merchants")] --> S3["stg_merchants"]
+    R1[("raw_authorizations")] --> S1["stg_authorizations"]
+    R2[("raw_settlements")] --> S2["stg_settlements"]
+    R3[("raw_merchants")] --> S3["stg_merchants"]
 
-    S1 --> I["🔗 int_auth_settlement_matched<br/><i>LEFT JOIN · grain = authorization</i>"]
+    S1 --> I["int_auth_settlement_matched<br/><i>LEFT JOIN · grain = authorization</i>"]
     S2 --> I
 
-    I --> M1["📊 fct_merchant_daily_volume<br/><b>incremental</b> · late-arrival window"]
-    I --> M2["🚩 fct_settlement_exceptions<br/>what finance chases"]
-    S3 --> SN["🕰️ snap_merchants<br/><b>SCD2</b> history"]
+    I --> M1["fct_merchant_daily_volume<br/><b>incremental</b> · late-arrival window"]
+    I --> M2["fct_settlement_exceptions<br/>what finance chases"]
+    S3 --> SN["snap_merchants<br/><b>SCD2</b> history"]
 
     style R1 fill:#64748b,stroke:#334155,color:#fff
     style R2 fill:#64748b,stroke:#334155,color:#fff
@@ -90,9 +90,9 @@ No warehouse account needed — it runs on DuckDB, straight after clone.
 
 ---
 
-## ⭐ The three things worth reading
+## The three things worth reading
 
-### 1️⃣ The late-arrival window
+### 1. The late-arrival window
 
 This is the heart of it. The obvious way to write an incremental model is "process today's rows". That's wrong here, because a settlement landing today might belong to **last Tuesday** — a day this model will never look at again.
 
@@ -121,19 +121,19 @@ where auth_date >= (
 
 It reached back and fixed a day it had already written. A `where auth_date = current_date` version leaves that day wrong forever, with nothing in the logs.
 
-### 2️⃣ Why it's a LEFT JOIN
+### 2. Why it's a LEFT JOIN
 
 An inner join looks fine and quietly deletes your problem cases:
 
 | status | what it means | rows |
 |---|---|---|
-| 🟢 `SETTLED` | matched | 22,564 |
-| 🟡 `PENDING` | not settled *yet*, still inside the window | ~578 |
-| 🔴 `UNSETTLED` | past the window, never coming | ~1,830 |
+| `SETTLED` | matched | 22,564 |
+| `PENDING` | not settled *yet*, still inside the window | ~578 |
+| `UNSETTLED` | past the window, never coming | ~1,830 |
 
 Those bottom two just disappear under an inner join, and merchant volume comes out low with no error anywhere. The grain stays on the authorization so the join can't inflate counts either — there's a `unique` test on `auth_id` guarding exactly that.
 
-### 3️⃣ A test I got wrong, and fixed properly
+### 3. A test I got wrong, and fixed properly
 
 I wrote an invariant: aggregate settled volume shouldn't exceed authorized by more than 30%. It **failed** — on 2 merchant-days out of 2,699.
 
@@ -150,7 +150,7 @@ A test that fails on correct data teaches people to ignore tests. Low-volume day
 
 ---
 
-## 🕰️ SCD2, and why not just overwrite
+## SCD2, and why not just overwrite
 
 Merchants get re-tiered. If you overwrite the dimension, every historical fact silently re-attributes itself to the merchant's *current* risk tier — so last quarter's numbers change, and the same report run twice gives two answers.
 
@@ -165,13 +165,13 @@ Now a fact can join to the version of the merchant that was true on its own date
 
 ---
 
-## 🧪 Tests
+## Tests
 
 <img src="https://img.shields.io/badge/33-passing-2ea44f?style=flat-square"> `unique` · `not_null` · `relationships` across both streams · `accepted_values` on status and exception enums · unique-combination on the mart's grain · a singular reconciliation invariant
 
 ---
 
-## 📁 Layout
+## Layout
 
 ```
 models/staging/        stg_authorizations · stg_settlements · stg_merchants
@@ -182,7 +182,7 @@ tests/                 custom generic tests + the reconciliation invariant
 scripts/               synthetic data generator
 ```
 
-## 🎲 About the data
+## About the data
 
 `scripts/generate_data.py` is seeded, so builds are reproducible — and it's deliberately awkward. A 7–9 day settlement tail *outside* the agreed window. Drift values on **both sides** of the 25% over-capture line (1.18× and 1.20× are ordinary tips and must *not* trip it; 1.40× must). Merchants whose attributes change mid-window.
 
