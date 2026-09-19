@@ -191,5 +191,5 @@ If the data matched up neatly, a broken join would still look correct, and the p
 ---
 
 <p align="center">
-  <sub>Built by <a href="https://github.com/swapnatondapu7-netizen">Swapna Tondapu</a>. I wanted to do the transformations, dependencies and tests I already do by hand at American Express, but in dbt.</sub>
+  <sub>Built by <a href="https://github.com/swapnatondapu7">Swapna Tondapu</a>. I wanted to do the transformations, dependencies and tests I already do by hand at American Express, but in dbt.</sub>
 </p>
