@@ -1,16 +1,84 @@
-# merchant-settlement-dbt
+<h1 align="center">🏦 merchant-settlement-dbt</h1>
 
-A dbt project that models **card authorization vs settlement reconciliation** at
-merchant-day grain — incremental models with a late-arrival window, an SCD2
-merchant dimension, and the data tests that catch a broken join before anyone
-downstream sees it.
+<p align="center">
+  <b>What happens when a card settlement shows up four days late?</b><br>
+  A dbt project about the awkward gap between <i>authorized</i> and <i>settled</i>.
+</p>
 
-I built this to express in dbt the transformation, DAG and testing work I do by
-hand at American Express, where I work on the batch and streaming pipelines
-behind roughly 1M card transactions and ~8 TB a day.
+<p align="center">
+  <img src="https://img.shields.io/badge/dbt-1.12-FF694B?style=for-the-badge&logo=dbt&logoColor=white">
+  <img src="https://img.shields.io/badge/DuckDB-runs%20locally-FFF000?style=for-the-badge&logo=duckdb&logoColor=black">
+  <img src="https://img.shields.io/badge/tests-33%20passing-2ea44f?style=for-the-badge">
+  <img src="https://img.shields.io/badge/SCD2-snapshot-8b5cf6?style=for-the-badge">
+</p>
 
-It runs on DuckDB, so `dbt build` works immediately after clone with no
-warehouse credentials.
+---
+
+## 🤔 The problem
+
+When you tap your card, two things happen — and they don't happen together.
+
+First an **authorization**: the money is checked and held. Later, a **settlement**: the money actually moves. "Later" is doing a lot of work in that sentence. It might be the same evening. It might be nine days. Sometimes it never comes at all, because the transaction was reversed or abandoned.
+
+And the amounts often don't match either. You authorize $40 for dinner, tip, and $48 settles.
+
+I work on pipelines like this at American Express, and this is the thing that bites people:
+
+> A day you already reported can still change tomorrow.
+
+Every one of these quirks breaks a naive pipeline **silently**. No error, no failed job — just a number that's quietly wrong, and a finance team that finds out before you do.
+
+```mermaid
+flowchart LR
+    subgraph day1 ["🗓️ Monday"]
+      A1["auth $40"]
+    end
+    subgraph day2 ["🗓️ Tuesday"]
+      A2["auth $25"]
+    end
+    subgraph friday ["🗓️ Friday"]
+      S1["settles $48 💸<br/><i>belongs to Monday</i>"]
+      S2["never settles ❌"]
+    end
+    A1 -.4 days late.-> S1
+    A2 -.reversed.-> S2
+
+    style A1 fill:#2563eb,stroke:#1e40af,color:#fff
+    style A2 fill:#2563eb,stroke:#1e40af,color:#fff
+    style S1 fill:#f59e0b,stroke:#b45309,color:#fff
+    style S2 fill:#ef4444,stroke:#991b1b,color:#fff
+```
+
+Monday's total was wrong all week. Nothing told you.
+
+---
+
+## 🧱 How it's built
+
+```mermaid
+flowchart TD
+    R1[("🌱 raw_authorizations")] --> S1["stg_authorizations"]
+    R2[("🌱 raw_settlements")] --> S2["stg_settlements"]
+    R3[("🌱 raw_merchants")] --> S3["stg_merchants"]
+
+    S1 --> I["🔗 int_auth_settlement_matched<br/><i>LEFT JOIN · grain = authorization</i>"]
+    S2 --> I
+
+    I --> M1["📊 fct_merchant_daily_volume<br/><b>incremental</b> · late-arrival window"]
+    I --> M2["🚩 fct_settlement_exceptions<br/>what finance chases"]
+    S3 --> SN["🕰️ snap_merchants<br/><b>SCD2</b> history"]
+
+    style R1 fill:#64748b,stroke:#334155,color:#fff
+    style R2 fill:#64748b,stroke:#334155,color:#fff
+    style R3 fill:#64748b,stroke:#334155,color:#fff
+    style S1 fill:#0ea5e9,stroke:#0369a1,color:#fff
+    style S2 fill:#0ea5e9,stroke:#0369a1,color:#fff
+    style S3 fill:#0ea5e9,stroke:#0369a1,color:#fff
+    style I fill:#8b5cf6,stroke:#6d28d9,color:#fff
+    style M1 fill:#2ea44f,stroke:#166534,color:#fff
+    style M2 fill:#f59e0b,stroke:#b45309,color:#fff
+    style SN fill:#ec4899,stroke:#9d174d,color:#fff
+```
 
 ```bash
 python -m venv .venv && ./.venv/bin/pip install dbt-duckdb
@@ -18,42 +86,17 @@ python -m venv .venv && ./.venv/bin/pip install dbt-duckdb
 ./.venv/bin/dbt build --profiles-dir .          # 33 models, snapshots and tests
 ```
 
+No warehouse account needed — it runs on DuckDB, straight after clone.
+
 ---
 
-## The problem this models
+## ⭐ The three things worth reading
 
-Authorization and settlement arrive as **two separate streams that do not line
-up one-to-one**:
+### 1️⃣ The late-arrival window
 
-- a settlement lands **0–9 days after** its authorization
-- the settled amount **differs** from the authorized amount (tips, partial captures)
-- some authorizations **never settle** (reversed, abandoned)
-- merchant attributes (risk tier, region) **change over time**
+This is the heart of it. The obvious way to write an incremental model is "process today's rows". That's wrong here, because a settlement landing today might belong to **last Tuesday** — a day this model will never look at again.
 
-Each of those breaks a naive implementation in a way that produces no error —
-just a wrong number. The project is organised around handling them explicitly.
-
-## What the pipeline does
-
-```
-seeds (raw auth / settlement / merchant streams)
-  └── staging/          cast + rename only, one model per source
-        └── intermediate/int_auth_settlement_matched
-              │           auth LEFT JOIN settlement, grain held at the auth
-              ├── marts/fct_merchant_daily_volume      (incremental)
-              └── marts/fct_settlement_exceptions      (what finance chases)
-  └── snapshots/snap_merchants                          (SCD2 history)
-```
-
-### 1. The late-arrival window — the core of the project
-
-A settlement can land days after its authorization, so **days that already
-looked finished keep changing**. An incremental model filtered on
-`auth_date = current_date` never revisits those days, and they under-report
-forever with nothing in the logs.
-
-`fct_merchant_daily_volume` instead reprocesses a trailing window and replaces
-those days wholesale:
+So instead it reprocesses a trailing window and replaces those days wholesale:
 
 ```sql
 {{ config(materialized='incremental',
@@ -69,91 +112,84 @@ where auth_date >= (
 {% endif %}
 ```
 
-**Verified, not asserted.** Injecting a settlement that arrives 4 days late and
-re-running the model:
+**I tested this rather than trusting it.** Injected a settlement arriving 4 days late, re-ran the model:
 
-```
-before:  merchant 6 on 2026-09-11 -> 4 open auths, settled $173.78
-after:   merchant 6 on 2026-09-11 -> 3 open auths, settled $187.87
-```
-
-The model reached back and corrected a day it had already written.
-
-### 2. LEFT JOIN, and why the grain is the authorization
-
-An inner join silently drops the two populations the business cares about most:
-
-| status | meaning | rows |
+| | open auths | settled |
 |---|---|---|
-| `SETTLED` | matched | 22,564 |
-| `PENDING` | not settled *yet*, still inside the window | ~578 |
-| `UNSETTLED` | past the window, never settled | ~1,830 |
+| before | 4 | $173.78 |
+| **after** | **3** | **$187.87** |
 
-Both non-settled groups simply vanish under an inner join and merchant volume
-comes out low with no error anywhere. Holding the grain on the authorization
-side also prevents the classic fan-out bug — `int_auth_settlement_matched` has
-a `unique` test on `auth_id` precisely to catch it.
+It reached back and fixed a day it had already written. A `where auth_date = current_date` version leaves that day wrong forever, with nothing in the logs.
 
-### 3. SCD2 merchant dimension
+### 2️⃣ Why it's a LEFT JOIN
 
-Risk tier and region change. Overwriting the dimension silently re-attributes
-historical facts to a merchant's *current* attributes, so last quarter's volume
-by risk tier changes every time someone re-tiers a merchant — and a report run
-twice gives two answers.
+An inner join looks fine and quietly deletes your problem cases:
 
-```
-snap_merchants: 68 rows | 60 current | 8 historical
+| status | what it means | rows |
+|---|---|---|
+| 🟢 `SETTLED` | matched | 22,564 |
+| 🟡 `PENDING` | not settled *yet*, still inside the window | ~578 |
+| 🔴 `UNSETTLED` | past the window, never coming | ~1,830 |
 
-merchant 2  risk=LOW   region=US-WEST  valid 2026-08-02 -> 2026-09-10
-merchant 2  risk=HIGH  region=US-WEST  valid 2026-09-10 -> CURRENT
-```
+Those bottom two just disappear under an inner join, and merchant volume comes out low with no error anywhere. The grain stays on the authorization so the join can't inflate counts either — there's a `unique` test on `auth_id` guarding exactly that.
 
-### 4. Tests — and one that had to be corrected
+### 3️⃣ A test I got wrong, and fixed properly
 
-**33 checks pass**: `unique`, `not_null`, `relationships` between the two
-streams, `accepted_values` on status and exception enums, a
-unique-combination test on the mart's grain, and a singular reconciliation
-invariant.
+I wrote an invariant: aggregate settled volume shouldn't exceed authorized by more than 30%. It **failed** — on 2 merchant-days out of 2,699.
 
-The invariant is the interesting one. First version asserted that aggregate
-settled volume never exceeds authorized by >30% — and it **failed on 2 of 2,699
-merchant-days**, with 3 and 13 authorizations respectively. On a 3-transaction
-day a single legitimate 1.4× over-capture moves the whole ratio. The signal was
-small-sample noise, not a broken join.
+I looked before loosening it. Both had **3 and 13 transactions**. On a three-transaction day, one legitimate $40→$56 tip moves the whole ratio. The data was fine; my test was naive.
 
-Rather than loosen the threshold and weaken the test everywhere, I added a
-volume floor and documented why:
+The tempting fix is to raise the threshold. That weakens it everywhere to satisfy two rows. So instead it got a volume floor and a comment explaining why:
 
 ```sql
 where auth_count >= 20                      -- below this, one tip dominates
   and settled_amount > authorized_amount * 1.30
 ```
 
-A test that fails on correct data trains people to ignore it. Low-volume days
-are covered by `fct_settlement_exceptions` instead, which is a report rather
-than a build-blocking assertion.
+A test that fails on correct data teaches people to ignore tests. Low-volume days are covered by `fct_settlement_exceptions` instead — a report, not a build-blocker.
 
-## Repo layout
+---
+
+## 🕰️ SCD2, and why not just overwrite
+
+Merchants get re-tiered. If you overwrite the dimension, every historical fact silently re-attributes itself to the merchant's *current* risk tier — so last quarter's numbers change, and the same report run twice gives two answers.
 
 ```
-models/staging/        stg_authorizations, stg_settlements, stg_merchants
+snap_merchants: 68 rows · 60 current · 8 historical
+
+merchant 2   risk=LOW    valid 2026-08-02 → 2026-09-10
+merchant 2   risk=HIGH   valid 2026-09-10 → CURRENT
+```
+
+Now a fact can join to the version of the merchant that was true on its own date.
+
+---
+
+## 🧪 Tests
+
+<img src="https://img.shields.io/badge/33-passing-2ea44f?style=flat-square"> `unique` · `not_null` · `relationships` across both streams · `accepted_values` on status and exception enums · unique-combination on the mart's grain · a singular reconciliation invariant
+
+---
+
+## 📁 Layout
+
+```
+models/staging/        stg_authorizations · stg_settlements · stg_merchants
 models/intermediate/   int_auth_settlement_matched
-models/marts/          fct_merchant_daily_volume, fct_settlement_exceptions
-snapshots/             snap_merchants (SCD2)
+models/marts/          fct_merchant_daily_volume · fct_settlement_exceptions
+snapshots/             snap_merchants  (SCD2)
 tests/                 custom generic tests + the reconciliation invariant
 scripts/               synthetic data generator
 ```
 
-## Notes on the data
+## 🎲 About the data
 
-`scripts/generate_data.py` is seeded (deterministic) and deliberately emits
-awkward data: a 7–9 day settlement tail *outside* the agreed window, drift
-values on **both sides** of the 25% over-capture threshold (1.18/1.20 are
-normal tips and must not trip it; 1.40 must), and merchants whose attributes
-change mid-window. Data that matched perfectly would let a naive join look
-correct, which would defeat the point.
+`scripts/generate_data.py` is seeded, so builds are reproducible — and it's deliberately awkward. A 7–9 day settlement tail *outside* the agreed window. Drift values on **both sides** of the 25% over-capture line (1.18× and 1.20× are ordinary tips and must *not* trip it; 1.40× must). Merchants whose attributes change mid-window.
 
-## Stack
+Data that matched up neatly would let a broken join look correct — which would rather defeat the point.
 
-dbt 1.12 · DuckDB (swap `profiles.yml` for Snowflake/BigQuery — the SQL is
-standard) · Python for data generation
+---
+
+<p align="center">
+  <sub>Built by <a href="https://github.com/swapnatondapu7-netizen">Swapna Tondapu</a> — I wanted to express in dbt the transformation, DAG and testing work I do by hand at American Express.</sub>
+</p>
