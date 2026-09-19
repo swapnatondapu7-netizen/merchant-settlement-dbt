@@ -1,0 +1,79 @@
+version: 2
+
+models:
+  - name: stg_authorizations
+    description: One row per authorization attempt.
+    columns:
+      - name: auth_id
+        description: Primary key of the authorization stream.
+        tests: [unique, not_null]
+      - name: merchant_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_merchants')
+              field: merchant_id
+      - name: auth_amount
+        tests:
+          - not_null
+          # An authorization for zero or a negative amount is not a business
+          # case here - it would be a reversal, which arrives on its own topic.
+          - dbt_utils_positive: {}
+
+  - name: stg_settlements
+    description: One row per settlement, arriving 0-5 days after its auth.
+    columns:
+      - name: settlement_id
+        tests: [unique, not_null]
+      - name: auth_id
+        description: >
+          Every settlement must point at a real authorization. An orphan here
+          means the streams have drifted, which is a genuine incident.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_authorizations')
+              field: auth_id
+
+  - name: stg_merchants
+    columns:
+      - name: merchant_id
+        tests: [unique, not_null]
+      - name: risk_tier
+        tests:
+          - accepted_values:
+              values: ['LOW', 'MEDIUM', 'HIGH']
+
+  - name: int_auth_settlement_matched
+    description: Authorizations left-joined to their settlement, if any.
+    columns:
+      - name: auth_id
+        description: >
+          Still unique after the join. If this test fails, a single auth has
+          matched more than one settlement and every downstream sum is
+          inflated - the classic fan-out bug in this domain.
+        tests: [unique, not_null]
+      - name: settlement_status
+        tests:
+          - accepted_values:
+              values: ['SETTLED', 'PENDING', 'UNSETTLED']
+
+  - name: fct_merchant_daily_volume
+    description: Merchant-by-day authorized vs settled volume.
+    tests:
+      - dbt_utils_unique_combination:
+          combination_of_columns: [merchant_id, auth_date]
+    columns:
+      - name: authorized_amount
+        tests: [not_null]
+      - name: settled_amount
+        tests: [not_null]
+
+  - name: fct_settlement_exceptions
+    description: Rows finance chases. Expected to be non-zero.
+    columns:
+      - name: exception_type
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['OVER_CAPTURE', 'PARTIAL_CAPTURE', 'LATE_SETTLEMENT', 'NEVER_SETTLED']

@@ -1,0 +1,32 @@
+name: merchant_settlement
+version: "1.0.0"
+config-version: 2
+profile: merchant_settlement
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  # How many days a settlement may lag its authorization. Every incremental
+  # model reprocesses this trailing window rather than only "today", because
+  # a settlement landing 4 days late must still be able to correct the day it
+  # belongs to. This is the single most important number in the project.
+  settlement_lag_days: 5
+
+models:
+  merchant_settlement:
+    staging:
+      +materialized: view
+    intermediate:
+      +materialized: view
+    marts:
+      +materialized: table
+
+seeds:
+  merchant_settlement:
+    +quote_columns: false

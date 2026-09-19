@@ -1,0 +1,10 @@
+version: 2
+
+# NOTE: there is deliberately no `sources:` block here.
+#
+# In production these raw tables are the Kafka authorization and settlement
+# topics landed in the warehouse, and they would be declared as sources. In
+# this repo they are seeds, so the staging models use ref() instead - that is
+# what puts the seeds in the DAG. Declaring them as sources compiled fine but
+# let dbt run the staging models BEFORE the seeds had loaded, because a source
+# carries no dependency edge.

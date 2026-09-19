@@ -1,0 +1,10 @@
+# Local-only profile. DuckDB is used so the whole project runs with no
+# warehouse credentials - `dbt build` works on a laptop straight after clone.
+# The SQL is standard enough to move to Snowflake/BigQuery by swapping this.
+merchant_settlement:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: target/merchant_settlement.duckdb
+      threads: 4
