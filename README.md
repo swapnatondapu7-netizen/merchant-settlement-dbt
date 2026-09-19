@@ -1,8 +1,8 @@
 <h1 align="center">merchant-settlement-dbt</h1>
 
 <p align="center">
-  <b>What happens when a card settlement shows up four days late?</b><br>
-  A dbt project about the awkward gap between <i>authorized</i> and <i>settled</i>.
+  <b>What happens when a card settlement turns up four days late?</b><br>
+  A dbt project about the gap between the money being <i>authorized</i> and the money actually <i>moving</i>.
 </p>
 
 <p align="center">
@@ -16,17 +16,17 @@
 
 ## The problem
 
-When you tap your card, two things happen — and they don't happen together.
+When you tap your card, two separate things happen, and they do not happen at the same time.
 
-First an **authorization**: the money is checked and held. Later, a **settlement**: the money actually moves. "Later" is doing a lot of work in that sentence. It might be the same evening. It might be nine days. Sometimes it never comes at all, because the transaction was reversed or abandoned.
+First the **authorization**: the bank checks the money is there and holds it. Then later the **settlement**: the money actually moves. That gap can be a few hours or it can be nine days. Sometimes the settlement never arrives at all, because the payment was reversed or dropped.
 
-And the amounts often don't match either. You authorize $40 for dinner, tip, and $48 settles.
+The amounts often do not match either. Your card is authorized for $40 at dinner, you add a tip, and $48 settles.
 
-I work on pipelines like this at American Express, and this is the thing that bites people:
+I work on pipelines like this at American Express. This is the part that catches people out:
 
 > A day you already reported can still change tomorrow.
 
-Every one of these quirks breaks a naive pipeline **silently**. No error, no failed job — just a number that's quietly wrong, and a finance team that finds out before you do.
+None of this throws an error. Nothing fails. You just get a number that is wrong, and usually someone in finance notices before you do.
 
 ```mermaid
 flowchart LR
@@ -49,7 +49,7 @@ flowchart LR
     style S2 fill:#ef4444,stroke:#991b1b,color:#fff
 ```
 
-Monday's total was wrong all week. Nothing told you.
+Monday's total was too low all week, and nothing said so.
 
 ---
 
@@ -86,17 +86,17 @@ python -m venv .venv && ./.venv/bin/pip install dbt-duckdb
 ./.venv/bin/dbt build --profiles-dir .          # 33 models, snapshots and tests
 ```
 
-No warehouse account needed — it runs on DuckDB, straight after clone.
+You do not need a warehouse account. It runs on DuckDB as soon as you clone it.
 
 ---
 
-## The three things worth reading
+## The three parts worth reading
 
 ### 1. The late-arrival window
 
-This is the heart of it. The obvious way to write an incremental model is "process today's rows". That's wrong here, because a settlement landing today might belong to **last Tuesday** — a day this model will never look at again.
+This is the main idea. The obvious way to write an incremental model is to process today's rows only. That does not work here, because a settlement arriving today might belong to **last Tuesday**, and the model would never look at Tuesday again.
 
-So instead it reprocesses a trailing window and replaces those days wholesale:
+So instead it goes back over the last few days every run and rewrites those days completely:
 
 ```sql
 {{ config(materialized='incremental',
@@ -112,18 +112,18 @@ where auth_date >= (
 {% endif %}
 ```
 
-**I tested this rather than trusting it.** Injected a settlement arriving 4 days late, re-ran the model:
+**I tested this instead of assuming it.** I added a settlement that arrived 4 days late and ran the model again:
 
 | | open auths | settled |
 |---|---|---|
 | before | 4 | $173.78 |
 | **after** | **3** | **$187.87** |
 
-It reached back and fixed a day it had already written. A `where auth_date = current_date` version leaves that day wrong forever, with nothing in the logs.
+It went back and fixed a day it had already written. A model filtered on today only would leave that day wrong forever, and nothing in the logs would tell you.
 
 ### 2. Why it's a LEFT JOIN
 
-An inner join looks fine and quietly deletes your problem cases:
+An inner join looks fine, but it quietly drops the rows you most need to see:
 
 | status | what it means | rows |
 |---|---|---|
@@ -131,28 +131,28 @@ An inner join looks fine and quietly deletes your problem cases:
 | `PENDING` | not settled *yet*, still inside the window | ~578 |
 | `UNSETTLED` | past the window, never coming | ~1,830 |
 
-Those bottom two just disappear under an inner join, and merchant volume comes out low with no error anywhere. The grain stays on the authorization so the join can't inflate counts either — there's a `unique` test on `auth_id` guarding exactly that.
+The bottom two rows vanish with an inner join, so merchant volume comes out too low and nothing complains. The table also stays at one row per authorization, so the join cannot double count. There is a `unique` test on `auth_id` checking exactly that.
 
 ### 3. A test I got wrong, and fixed properly
 
-I wrote an invariant: aggregate settled volume shouldn't exceed authorized by more than 30%. It **failed** — on 2 merchant-days out of 2,699.
+I wrote a test saying settled volume for a merchant-day should not be more than 30% above authorized volume. It **failed** on 2 merchant-days out of 2,699.
 
-I looked before loosening it. Both had **3 and 13 transactions**. On a three-transaction day, one legitimate $40→$56 tip moves the whole ratio. The data was fine; my test was naive.
+Before changing the number I looked at the two rows. They had **3 and 13 transactions**. On a day with three transactions, one normal $40 to $56 tip moves the whole ratio. The data was fine. My test was too simple.
 
-The tempting fix is to raise the threshold. That weakens it everywhere to satisfy two rows. So instead it got a volume floor and a comment explaining why:
+The easy fix is to raise the 30% to something higher, but that makes the test weaker everywhere just to keep two rows quiet. So instead I only apply it to days with enough transactions, and wrote down why:
 
 ```sql
 where auth_count >= 20                      -- below this, one tip dominates
   and settled_amount > authorized_amount * 1.30
 ```
 
-A test that fails on correct data teaches people to ignore tests. Low-volume days are covered by `fct_settlement_exceptions` instead — a report, not a build-blocker.
+If a test keeps failing on good data, people stop paying attention to it. Quiet days are covered by `fct_settlement_exceptions` instead, which is a report to read rather than something that stops the build.
 
 ---
 
 ## SCD2, and why not just overwrite
 
-Merchants get re-tiered. If you overwrite the dimension, every historical fact silently re-attributes itself to the merchant's *current* risk tier — so last quarter's numbers change, and the same report run twice gives two answers.
+Merchants get moved between risk tiers. If you just overwrite the merchant table, all the old transactions suddenly look like they belonged to the new tier. Last quarter's numbers change, and running the same report twice gives two different answers.
 
 ```
 snap_merchants: 68 rows · 60 current · 8 historical
@@ -161,7 +161,7 @@ merchant 2   risk=LOW    valid 2026-08-02 → 2026-09-10
 merchant 2   risk=HIGH   valid 2026-09-10 → CURRENT
 ```
 
-Now a fact can join to the version of the merchant that was true on its own date.
+Now a transaction can join to the version of the merchant that was correct on the day it happened.
 
 ---
 
@@ -184,12 +184,12 @@ scripts/               synthetic data generator
 
 ## About the data
 
-`scripts/generate_data.py` is seeded, so builds are reproducible — and it's deliberately awkward. A 7–9 day settlement tail *outside* the agreed window. Drift values on **both sides** of the 25% over-capture line (1.18× and 1.20× are ordinary tips and must *not* trip it; 1.40× must). Merchants whose attributes change mid-window.
+`scripts/generate_data.py` uses a fixed seed so every build is the same, and the data is messy on purpose. Some settlements arrive 7 to 9 days late, which is outside the allowed window. Some amounts are just above the 25% over-capture line and some just below it, so the rule is actually tested (1.18x and 1.20x are normal tips and should not trigger it, 1.40x should). Some merchants change risk tier halfway through.
 
-Data that matched up neatly would let a broken join look correct — which would rather defeat the point.
+If the data matched up neatly, a broken join would still look correct, and the project would not prove anything.
 
 ---
 
 <p align="center">
-  <sub>Built by <a href="https://github.com/swapnatondapu7-netizen">Swapna Tondapu</a> — I wanted to express in dbt the transformation, DAG and testing work I do by hand at American Express.</sub>
+  <sub>Built by <a href="https://github.com/swapnatondapu7-netizen">Swapna Tondapu</a>. I wanted to do the transformations, dependencies and tests I already do by hand at American Express, but in dbt.</sub>
 </p>
